@@ -6,9 +6,14 @@ K8S_CURL_ARGS="--cacert /run/secrets/kubernetes.io/serviceaccount/ca.crt"
 KUBE_API_ENDPOINT="${KUBE_API_ENDPOINT:-"https://kubernetes.default.svc:443"}"
 SLEEP_TIME="${SLEEP_TIME:-"30"}"
 
-LABEL_SELECTOR=""
+NODE_LABEL_SELECTOR=""
 if [[ ! -z "${NODE_SELECTOR}" ]]; then
-  LABEL_SELECTOR="?labelSelector=${NODE_SELECTOR}"
+  NODE_LABEL_SELECTOR="?labelSelector=${NODE_SELECTOR}"
+fi
+
+POD_LABEL_SELECTOR=""
+if [[ ! -z "${POD_SELECTOR}" ]]; then
+  POD_LABEL_SELECTOR="?labelSelector=${POD_SELECTOR}"
 fi
 
 if [[ -z "${DIGITALOCEAN_TOKEN}" ]]; then
@@ -26,12 +31,37 @@ function get_node_droplet_id(){
   jq -cr '.metadata.annotations."csi.volume.kubernetes.io/nodeid" | fromjson | ."dobs.csi.digitalocean.com"'
 }
 
+
+# Pipe in v1/Pod JSON and get back the node name
+function get_pod_node_name(){
+  jq -cr '.spec.nodeName'
+}
+
+# Pipe in v1/Node JSON and get back the droplet ID
+# Usage: get_pod_droplet_id <pod>
+function get_node_name_droplet_id(){
+  K8S_TOKEN="$(cat /run/secrets/kubernetes.io/serviceaccount/token)"
+  curl -s ${K8S_CURL_ARGS} \
+    --header "Authorization: Bearer ${K8S_TOKEN}" \
+    "${KUBE_API_ENDPOINT}/api/v1/nodes/${1}" \
+  | jq -cr '.metadata.annotations."csi.volume.kubernetes.io/nodeid" | fromjson | ."dobs.csi.digitalocean.com"'
+}
+
 # Returns a JSON list of nodes
 function get_node_list(){
   K8S_TOKEN="$(cat /run/secrets/kubernetes.io/serviceaccount/token)"
   curl -s ${K8S_CURL_ARGS} \
     --header "Authorization: Bearer ${K8S_TOKEN}" \
-    "${KUBE_API_ENDPOINT}/api/v1/nodes${LABEL_SELECTOR}" \
+    "${KUBE_API_ENDPOINT}/api/v1/nodes${NODE_LABEL_SELECTOR}" \
+  | jq -cr
+}
+
+# Returns a JSON list of pods
+function get_pod_list(){
+  K8S_TOKEN="$(cat /run/secrets/kubernetes.io/serviceaccount/token)"
+  curl -s ${K8S_CURL_ARGS} \
+    --header "Authorization: Bearer ${K8S_TOKEN}" \
+    "${KUBE_API_ENDPOINT}/api/v1/pods${POD_LABEL_SELECTOR}" \
   | jq -cr
 }
 
@@ -90,7 +120,12 @@ function remove_node_label() {
 
 function run_main(){
   ASSIGNED_TO=$(get_current_droplet_id)
-  DROPLET=$(get_node_list | jq '.items[0]' | get_node_droplet_id)
+  if [[ ! -z "${POD_SELECTOR}" ]]; then
+    NODE_NAME=$(get_pod_list | jq '.items[0]' | get_pod_node_name)
+    DROPLET=$(get_node_name_droplet_id $NODE_NAME)
+  else
+    DROPLET=$(get_node_list | jq '.items[0]' | get_node_droplet_id)
+  fi
   if [[ "${ASSIGNED_TO}" == "${DROPLET}" ]]; then
     echo "Already assigned - Doing nothing" >> /dev/null
   else
